@@ -74,12 +74,15 @@ class UrlGeneratorTest extends \PHPUnit_Framework_TestCase
         $this->assertEquals('/app.php/testing', $url);
     }
 
+    /**
+     * @expectedException Symfony\Component\Routing\Exception\InvalidParameterException
+     */
     public function testRelativeUrlWithNullParameterButNotOptional()
     {
         $routes = $this->getRoutes('test', new Route('/testing/{foo}/bar', array('foo' => null)));
-        $url = $this->getGenerator($routes)->generate('test', array(), false);
-
-        $this->assertEquals('/app.php/testing//bar', $url);
+        // This must raise an exception because the default requirement for "foo" is "[^/]+" which is not met with these params.
+        // Generating path "/testing//bar" would be wrong as matching this route would fail.
+        $this->getGenerator($routes)->generate('test', array(), false);
     }
 
     public function testRelativeUrlWithOptionalZeroParameter()
@@ -88,6 +91,13 @@ class UrlGeneratorTest extends \PHPUnit_Framework_TestCase
         $url = $this->getGenerator($routes)->generate('test', array('page' => 0), false);
 
         $this->assertEquals('/app.php/testing/0', $url);
+    }
+
+    public function testNotPassedOptionalParameterInBetween()
+    {
+        $routes = $this->getRoutes('test', new Route('/{slug}/{page}', array('slug' => 'index', 'page' => 0)));
+        $this->assertSame('/app.php/index/1', $this->getGenerator($routes)->generate('test', array('page' => 1)));
+        $this->assertSame('/app.php/', $this->getGenerator($routes)->generate('test'));
     }
 
     public function testRelativeUrlWithExtraParameters()
@@ -165,32 +175,54 @@ class UrlGeneratorTest extends \PHPUnit_Framework_TestCase
         $this->getGenerator($routes)->generate('test', array('foo' => 'bar'), true);
     }
 
+    /**
+     * @expectedException Symfony\Component\Routing\Exception\InvalidParameterException
+     */
+    public function testGenerateForRouteWithInvalidParameter()
+    {
+        $routes = $this->getRoutes('test', new Route('/testing/{foo}', array(), array('foo' => '1|2')));
+        $this->getGenerator($routes)->generate('test', array('foo' => '0'), true);
+    }
+
     public function testGenerateForRouteWithInvalidOptionalParameterNonStrict()
     {
         $routes = $this->getRoutes('test', new Route('/testing/{foo}', array('foo' => '1'), array('foo' => 'd+')));
         $generator = $this->getGenerator($routes);
-        $generator->setStrictParameters(false);
+        $generator->setStrictRequirements(false);
         $this->assertNull($generator->generate('test', array('foo' => 'bar'), true));
     }
 
     public function testGenerateForRouteWithInvalidOptionalParameterNonStrictWithLogger()
     {
+        if (!interface_exists('Symfony\Component\HttpKernel\Log\LoggerInterface')) {
+            $this->markTestSkipped('The "HttpKernel" component is not available');
+        }
+
         $routes = $this->getRoutes('test', new Route('/testing/{foo}', array('foo' => '1'), array('foo' => 'd+')));
         $logger = $this->getMock('Symfony\Component\HttpKernel\Log\LoggerInterface');
         $logger->expects($this->once())
             ->method('err');
         $generator = $this->getGenerator($routes, array(), $logger);
-        $generator->setStrictParameters(false);
+        $generator->setStrictRequirements(false);
         $this->assertNull($generator->generate('test', array('foo' => 'bar'), true));
     }
 
     /**
      * @expectedException Symfony\Component\Routing\Exception\InvalidParameterException
      */
-    public function testGenerateForRouteWithInvalidManditoryParameter()
+    public function testGenerateForRouteWithInvalidMandatoryParameter()
     {
         $routes = $this->getRoutes('test', new Route('/testing/{foo}', array(), array('foo' => 'd+')));
         $this->getGenerator($routes)->generate('test', array('foo' => 'bar'), true);
+    }
+    
+    /**
+     * @expectedException Symfony\Component\Routing\Exception\InvalidParameterException
+     */
+    public function testRequiredParamAndEmptyPassed()
+    {
+        $routes = $this->getRoutes('test', new Route('/{slug}', array(), array('slug' => '.+')));
+        $this->getGenerator($routes)->generate('test', array('slug' => ''));
     }
 
     public function testSchemeRequirementDoesNothingIfSameCurrentScheme()
@@ -223,6 +255,41 @@ class UrlGeneratorTest extends \PHPUnit_Framework_TestCase
         $routes = $this->getRoutes('test', new Route('/{default}', array('default' => 0)));
 
         $this->assertEquals('/app.php/foo', $this->getGenerator($routes)->generate('test', array('default' => 'foo')));
+    }
+
+    public function testQueryParamSameAsDefault()
+    {
+        $routes = $this->getRoutes('test', new Route('/test', array('default' => 'value')));
+
+        $this->assertSame('/app.php/test?default=foo', $this->getGenerator($routes)->generate('test', array('default' => 'foo')));
+        $this->assertSame('/app.php/test?default=value', $this->getGenerator($routes)->generate('test', array('default' => 'value')));
+        $this->assertSame('/app.php/test', $this->getGenerator($routes)->generate('test'));
+    }
+
+    public function testUrlEncoding()
+    {
+        // This tests the encoding of reserved characters that are used for delimiting of URI components (defined in RFC 3986)
+        // and other special ASCII chars. These chars are tested as static text path, variable path and query param.
+        $chars = '@:[]/()*\'" +,;-._~&$<>|{}%\\^`!?foo=bar#id';
+        $routes = $this->getRoutes('test', new Route("/$chars/{varpath}", array(), array('varpath' => '.+')));
+        $this->assertSame('/app.php/@:%5B%5D/%28%29*%27%22%20+,;-._~%26%24%3C%3E|%7B%7D%25%5C%5E%60!%3Ffoo=bar%23id'
+            . '/@:%5B%5D/%28%29*%27%22%20+,;-._~%26%24%3C%3E|%7B%7D%25%5C%5E%60!%3Ffoo=bar%23id'
+            . '?query=%40%3A%5B%5D%2F%28%29%2A%27%22+%2B%2C%3B-._%7E%26%24%3C%3E%7C%7B%7D%25%5C%5E%60%21%3Ffoo%3Dbar%23id',
+            $this->getGenerator($routes)->generate('test', array(
+                'varpath' => $chars,
+                'query' => $chars
+            ))
+        );
+    }
+
+    public function testEncodingOfRelativePathSegments()
+    {
+        $routes = $this->getRoutes('test', new Route('/dir/../dir/..'));
+        $this->assertSame('/app.php/dir/%2E%2E/dir/%2E%2E', $this->getGenerator($routes)->generate('test'));
+        $routes = $this->getRoutes('test', new Route('/dir/./dir/.'));
+        $this->assertSame('/app.php/dir/%2E/dir/%2E', $this->getGenerator($routes)->generate('test'));
+        $routes = $this->getRoutes('test', new Route('/a./.a/a../..a/...'));
+        $this->assertSame('/app.php/a./.a/a../..a/...', $this->getGenerator($routes)->generate('test'));
     }
 
     protected function getGenerator(RouteCollection $routes, array $parameters = array(), $logger = null)
